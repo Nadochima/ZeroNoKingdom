@@ -11,6 +11,18 @@ class Page extends ZeroFrame {
       if(this.site_info.event[0] == "file_done" && this.site_info.event[1] == "config.json")
         this.loadConfig();
     }
+
+    //detect login change
+    if(this.login != site_info.cert_user_id){
+      this.login = site_info.cert_user_id;
+
+      if(this.site_info.cert_user_id)
+        this.e_user.innerHTML = this.site_info.cert_user_id;
+      else
+        this.e_user.innerHTML = "login...";
+
+      this.refresh();
+    }
   }
 
   loadConfig(){
@@ -25,6 +37,14 @@ class Page extends ZeroFrame {
 
   onOpenWebsocket() {
     var _this = this;
+
+    this.e_user = document.getElementById("user");
+    this.e_user.onclick = function(e){
+      e.preventDefault();
+      _this.cmd("certSelect", {});
+    }
+
+    this.e_game = document.getElementById("game");
 
     //init 
     this.cmd("siteInfo", [], function(site_info) {
@@ -63,27 +83,28 @@ class Page extends ZeroFrame {
         //build order
         var base = _this.buildings[data.building || ""];
         if(base){
-          var building = state.computeBuilding(block.owner, data.building, block.timestamp);
+          var building = state.computeBuilding(block.owner, data.building, block.data.timestamp);
 
           //check in construction
           if(building.in_construction)
             return false;
-          
+
           //check maxlvl
           if(base.max_lvl != null){
             if(building.lvl+1 > base.max_lvl)
               return false;
           }
           else{ //or based on city hall
-            var city_hall = sate.computeBuilding(block.owner, "city_hall", block.timestamp);
+            var city_hall = sate.computeBuilding(block.owner, "city_hall", block.data.timestamp);
             if(building.lvl+1 > city_hall.lvl)
               return false;
           }
 
           //check resource cost
-          var factor = base.build_factor^(building.lvl); //+1-1
+          var factor = Math.pow(base.build_factor,building.lvl); //+1-1
           for(var resource in base.build_resources){
-            if(state.computeResource(block.owner, resource, block.timestamp) < base.build_resources[resource]*factor)
+            console.log(base.build_resources[resource]*factor);
+            if(state.computeResource(block.owner, resource, block.data.timestamp) < base.build_resources[resource]*factor)
               return false;
           }
 
@@ -95,24 +116,24 @@ class Page extends ZeroFrame {
     this.process_acts = {
       build: function(state, block, player_data, data){
         var base = _this.buildings[data.building];
-        var building = state.computeBuilding(block.owner, data.building, block.timestamp);
+        var building = state.computeBuilding(block.owner, data.building, block.data.timestamp);
 
         //consume build resources
-        var factor = base.build_factor^(building.lvl); //+1-1
+        var factor = Math.pow(base.build_factor, building.lvl); //+1-1
         for(var resource in base.build_resources)
-          state.varyResource(block.owner, resource, base.build_resources[resource]*factor);
+          state.varyResource(block.owner, resource, -base.build_resources[resource]*factor);
 
         //add previously generated resources (remember production)
         if(building.order_timestamp != null){
-          var factor = base.build_factor^(building.lvl-1); 
+          var factor = Math.pow(base.build_factor,building.lvl-1); 
           for(var resource in base.produce_resources){
             var amount = base.produce_resources[resource];
             if(amount > 0)
-              state.varyResource(block.owner, resource, factor*amount*(block.timestamp-building.order_timestamp));
+              state.varyResource(block.owner, resource, factor*amount*(block.data.timestamp-building.order_timestamp));
           }
         }
 
-        player_data.buildings[data.building] = {lvl: building.lvl+1, order_timestamp: block.timestamp};
+        player_data.buildings[data.building] = {lvl: building.lvl+1, order_timestamp: block.data.timestamp};
       }
     }
 
@@ -139,7 +160,7 @@ class Page extends ZeroFrame {
             if(act.length != 2)
               return false;
 
-            var cb = _this.check_acts[acts[0]];
+            var cb = _this.check_acts[act[0]];
             if(cb){
               var ok = cb(state, block, player_data, act[1]);
               if(!ok)
@@ -228,12 +249,14 @@ class Page extends ZeroFrame {
             //compute production
             for(var name in player.buildings){
               var base = _this.buildings[name];
-              var produced = base.produce_resources[resource];
-              if(produced > 0){
-                var building = this.computeBuilding(user, name, timestamp);
-                var factor = base.build_factor^(building.lvl-1);
-                if(!building.in_construction)
-                  amount += factor*produced*(timestamp-building.order_timestamp);
+              if(base.produce_resources){
+                var produced = base.produce_resources[resource];
+                if(produced > 0){
+                  var building = this.computeBuilding(user, name, timestamp);
+                  var factor = Math.pow(base.build_factor,building.lvl-1);
+                  if(!building.in_construction)
+                    amount += factor*produced*(timestamp-building.order_timestamp);
+                }
               }
             }
 
@@ -251,6 +274,7 @@ class Page extends ZeroFrame {
         }
       }
       else{ //post build
+        _this.refresh();
       }
     });
 
@@ -261,8 +285,8 @@ class Page extends ZeroFrame {
         return true;
 
       //timestamp check (blocks must have a valid timestamp)
-      if(block.timestamp == null 
-        || block.timestamp > _this.current_timestamp 
+      if(block.data.timestamp == null 
+        || block.data.timestamp > _this.current_timestamp 
         || (block.prev_block.data.timestamp != null && block.data.timestamp < block.prev_block.data.timestamp))
         return false;
 
@@ -297,6 +321,78 @@ class Page extends ZeroFrame {
       this.setSiteInfo(message.params)
     else
       this.log("Unknown incoming message:", cmd)
+  }
+
+  refresh(){
+    var _this = this;
+    var state = this.game_chain.state;
+
+    this.e_game.innerHTML = "";
+
+    if(this.game_chain.stats.built_hash){
+      if(this.site_info.cert_user_id){
+        var user = this.site_info.auth_address;
+        var player = state.players[user];
+        if(player){
+          var e_infos = document.createElement("textarea");
+          e_infos.style.width = "800px";
+          e_infos.style.height = "200px";
+
+          //display city info
+          e_infos.innerHTML += "city name: "+player.city_name;
+
+          var disp_resource = function(name){
+            e_infos.innerHTML += "\n"+name+": "+state.computeResource(user, name, _this.current_timestamp);
+          }
+
+          //display resources
+          e_infos.innerHTML += "\n\n= RESOURCES ="
+          disp_resource("wood");
+          disp_resource("stone");
+          disp_resource("iron");
+          this.e_game.appendChild(e_infos);
+
+          var disp_building = function(name){
+            var building = state.computeBuilding(user, name, _this.current_timestamp);
+            var e_up = document.createElement("input");
+            e_up.type = "button";
+            e_up.onclick = function(){
+              _this.game_chain.push({ type: "actions", timestamp: _this.current_timestamp, actions: [["build", {building: name}]]});
+            }
+            e_up.value = "UP "+name;
+
+            _this.e_game.appendChild(document.createElement("br"));
+            _this.e_game.appendChild(e_up);
+            _this.e_game.appendChild(document.createTextNode("lvl = "+building.lvl+" in_construction = "+building.in_construction));
+          }
+
+          disp_building("city_hall");
+          disp_building("sawmill");
+        }
+        else{
+          //city creation
+          var e_name = document.createElement("input");
+          e_name.type = "text";
+          e_name.placeholder = "city name (0-50)";
+          var e_valid = document.createElement("input");
+          e_valid.type = "button";
+          e_valid.value = "create city";
+          e_valid.onclick = function(){
+            if(e_name.value.length > 0 && e_name.value.length <= 50)
+              _this.game_chain.push({type: "register", timestamp: _this.current_timestamp, city_name: e_name.value});
+            else
+              alert("Invalid number of characters.");
+          }
+
+          this.e_game.appendChild(e_name);
+          this.e_game.appendChild(e_valid);
+        }
+      }
+      else
+        this.e_game.appendChild(document.createTextNode("Not logged."));
+    }
+    else
+      this.e_game.appendChild(document.createTextNode("Chain not loaded."));
   }
 }
 
