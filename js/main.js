@@ -95,7 +95,7 @@ class Page extends ZeroFrame {
               return false;
           }
           else{ //or based on city hall
-            var city_hall = sate.computeBuilding(block.owner, "city_hall", block.data.timestamp);
+            var city_hall = state.computeBuilding(block.owner, "city_hall", block.data.timestamp);
             if(building.lvl+1 > city_hall.lvl)
               return false;
           }
@@ -103,7 +103,6 @@ class Page extends ZeroFrame {
           //check resource cost
           var factor = Math.pow(base.build_factor,building.lvl); //+1-1
           for(var resource in base.build_resources){
-            console.log(base.build_resources[resource]*factor);
             if(state.computeResource(block.owner, resource, block.data.timestamp) < base.build_resources[resource]*factor)
               return false;
           }
@@ -133,7 +132,7 @@ class Page extends ZeroFrame {
           }
         }
 
-        player_data.buildings[data.building] = {lvl: building.lvl+1, order_timestamp: block.data.timestamp};
+        player_data.buildings[data.building] = {lvl: building.lvl, order_timestamp: block.data.timestamp};
       }
     }
 
@@ -216,7 +215,6 @@ class Page extends ZeroFrame {
     this.game_chain.addBuildCallback(function(state, pre){
       if(pre){ //pre build
         //init data/state
-        _this.current_timestamp = Math.floor(new Date().getTime()/300000);
         state.players = {}
 
         //state API
@@ -231,7 +229,7 @@ class Page extends ZeroFrame {
               r.lvl = building.lvl;
               if(building.order_timestamp != null){
                 r.order_timestamp = building.order_timestamp;
-                if(building.order_timestamp >= timestamp)
+                if(timestamp >= building.order_timestamp)
                   r.lvl++;
                 else
                   r.in_construction = true;
@@ -312,6 +310,7 @@ class Page extends ZeroFrame {
 
     //rebuild chain every 1.5 seconds (if no files has been updated, it's a boolean check).
     setInterval(function(){ 
+      _this.current_timestamp = Math.floor(new Date().getTime()/300000);
       _this.game_chain.build();
     }, 1500); 
   }
