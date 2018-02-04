@@ -36,11 +36,21 @@ class Page extends ZeroFrame {
     //game data
     this.buildings = {
       city_hall: { 
-        max_lvl: 5, //other buildings have a max_lvl of city_hall lvl*5
-        build_factor: 3, //time/resources base factor (factor^lvl*required to build)
-        build_time: 4,
+        max_lvl: 5, //other buildings have a max_lvl of the city_hall lvl
+        build_factor: 4, //time/resources base factor (factor^(target_lvl-1)*required to build)
+        build_time: 1,
         build_resources: {
           wood: 200
+        }
+      },
+      sawmill: {
+        build_factor: 2,
+        build_time: 1,
+        build_resources: {
+          wood: 100
+        },
+        produce_resources: { //resource produced per time unit
+          wood: 10
         }
       }
     }
@@ -49,13 +59,60 @@ class Page extends ZeroFrame {
     this.game_chain = new zchain("game", this);
 
     this.check_acts = {
-      build: function(state, block, data){
-        var cfg_building = _this.buildings[data.building || ""];
+      build: function(state, block, player_data, data){
+        //build order
+        var base = _this.buildings[data.building || ""];
+        if(base){
+          var building = state.computeBuilding(block.owner, data.building, block.timestamp);
+
+          //check in construction
+          if(building.in_construction)
+            return false;
+          
+          //check maxlvl
+          if(base.max_lvl != null){
+            if(building.lvl+1 > base.max_lvl)
+              return false;
+          }
+          else{ //or based on city hall
+            var city_hall = sate.computeBuilding(block.owner, "city_hall", block.timestamp);
+            if(building.lvl+1 > city_hall.lvl)
+              return false;
+          }
+
+          //check resource cost
+          var factor = base.build_factor^(building.lvl); //+1-1
+          for(var resource in base.build_resources){
+            if(state.computeResource(block.owner, resource, block.timestamp) < base.build_resources[resource]*factor)
+              return false;
+          }
+
+          return true;
+        }
       }
     }
 
     this.process_acts = {
-      build: function(state, block, data){
+      build: function(state, block, player_data, data){
+        var base = _this.buildings[data.building];
+        var building = state.computeBuilding(block.owner, data.building, block.timestamp);
+
+        //consume build resources
+        var factor = base.build_factor^(building.lvl); //+1-1
+        for(var resource in base.build_resources)
+          state.varyResource(block.owner, resource, base.build_resources[resource]*factor);
+
+        //add previously generated resources (remember production)
+        if(building.order_timestamp != null){
+          var factor = base.build_factor^(building.lvl-1); 
+          for(var resource in base.produce_resources){
+            var amount = base.produce_resources[resource];
+            if(amount > 0)
+              state.varyResource(block.owner, resource, factor*amount*(block.timestamp-building.order_timestamp));
+          }
+        }
+
+        player_data.buildings[data.building] = {lvl: building.lvl+1, order_timestamp: block.timestamp};
       }
     }
 
@@ -73,8 +130,10 @@ class Page extends ZeroFrame {
       },
       actions: function(state, block){
         // process actions
+        var player_data = state.players[block.owner];
+
         var acts = block.data.actions;
-        if(Array.isArray(acts)){
+        if(player_data && Array.isArray(acts)){
           for(var i = 0; i < acts.length; i++){
             var act = acts[i];
             if(act.length != 2)
@@ -82,7 +141,7 @@ class Page extends ZeroFrame {
 
             var cb = _this.check_acts[acts[0]];
             if(cb){
-              var ok = cb(state, block, act[1]);
+              var ok = cb(state, block, player_data, act[1]);
               if(!ok)
                 return false;
             }
@@ -103,16 +162,20 @@ class Page extends ZeroFrame {
         state.players[block.owner] = {
           city_name: block.data.city_name, 
           register_timestamp: block.data.timestamp,
-          resources_trs: {},
-          building_trs: {},
+          resources: {
+            wood: 500
+            //...
+          },
+          buildings: {},
           units: {}
         }
       },
       actions: function(state, block){
+        var player_data = state.players[block.owner];
         var acts = block.data.actions;
         for(var i = 0; i < acts.length; i++){
           var act = acts[i];
-          _this.process_acts[act[0]](state, block, act[1]);
+          _this.process_acts[act[0]](state, block, player_data, act[1]);
         }
       }
     }
@@ -131,8 +194,61 @@ class Page extends ZeroFrame {
     //build
     this.game_chain.addBuildCallback(function(state, pre){
       if(pre){ //pre build
+        //init data/state
         _this.current_timestamp = Math.floor(new Date().getTime()/300000);
         state.players = {}
+
+        //state API
+        //return {lvl: current lvl, in_construction: true/false, order_timestamp: next or previous build timestamp}
+        state.computeBuilding = function(user, name, timestamp){
+          var player = this.players[user];
+          var r = {lvl: 0, in_construction: false}
+          if(player){
+            var building = player.buildings[name];
+            var base = _this.buildings[name];
+            if(building){
+              r.lvl = building.lvl;
+              if(building.order_timestamp != null){
+                r.order_timestamp = building.order_timestamp;
+                if(building.order_timestamp >= timestamp)
+                  r.lvl++;
+                else
+                  r.in_construction = true;
+              }
+            }
+          }
+
+          return r;
+        }
+
+        state.computeResource = function(user, resource, timestamp){
+          var player = this.players[user];
+          var amount = 0;
+          if(player){
+            //compute production
+            for(var name in player.buildings){
+              var base = _this.buildings[name];
+              var produced = base.produce_resources[resource];
+              if(produced > 0){
+                var building = this.computeBuilding(user, name, timestamp);
+                var factor = base.build_factor^(building.lvl-1);
+                if(!building.in_construction)
+                  amount += factor*produced*(timestamp-building.order_timestamp);
+              }
+            }
+
+            //add balance
+            if(player.resources[resource] != null)
+              amount += player.resources[resource];
+          }
+
+          return amount;
+        }
+
+        state.varyResource = function(user, resource, amount){
+          var player = this.players[user];
+          player.resources[resource] = (player.resources[resource] ? player.resources[resource] : 0)+amount;
+        }
       }
       else{ //post build
       }
